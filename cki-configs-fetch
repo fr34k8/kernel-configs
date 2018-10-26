@@ -1,0 +1,98 @@
+#!/bin/bash
+
+set -o nounset -o errexit -o noclobber -o pipefail
+
+# A map of releases to maps of architectures to architecture types
+declare -r -A RELEASE_ARCH_MAP=(
+    [27]="
+        [aarch64]=secondary
+        [armhfp]=primary
+        [i386]=secondary
+        [ppc64]=secondary
+        [ppc64le]=secondary
+        [s390x]=secondary
+        [x86_64]=primary
+    "
+    [28]="
+        [aarch64]=primary
+        [armhfp]=primary
+        [i386]=secondary
+        [ppc64]=secondary
+        [ppc64le]=secondary
+        [s390x]=secondary
+        [x86_64]=primary
+    "
+)
+
+# A map of releases to maps of URL types to URLs (with substitutions)
+declare -r -A RELEASE_URL_TYPE_FMT_MAP=(
+    [27]="
+        [primary_releases]=http://download.fedoraproject.org/pub/fedora/linux/releases/\$RELEASE/Everything/\$ARCH/os/
+        [primary_updates]=http://download.fedoraproject.org/pub/fedora/linux/updates/\$RELEASE/\$ARCH/
+        [secondary_releases]=https://download.fedoraproject.org/pub/fedora-secondary/releases/\$RELEASE/Everything/\$ARCH/os
+        [secondary_updates]=https://download.fedoraproject.org/pub/fedora-secondary/updates/\$RELEASE/\$ARCH/
+    "
+    [28]="
+        [primary_releases]=http://download.fedoraproject.org/pub/fedora/linux/releases/\$RELEASE/Everything/\$ARCH/os/
+        [primary_updates]=http://download.fedoraproject.org/pub/fedora/linux/updates/\$RELEASE/Everything/\$ARCH/
+        [secondary_releases]=https://download.fedoraproject.org/pub/fedora-secondary/releases/\$RELEASE/Everything/\$ARCH/os
+        [secondary_updates]=https://download.fedoraproject.org/pub/fedora-secondary/updates/\$RELEASE/Everything/\$ARCH/
+    "
+)
+
+# A map of URL architectures to RPM architectures, where needed
+declare -r -A YUM_RPM_ARCH_MAP=(
+    [armhfp]=armv7hl
+    [i386]=i686
+)
+
+if [[ $# != 2 ]]; then
+    echo "Invalid number of arguments" >&2
+    echo "Usage: `basename $0` RELEASE ARCH" >&2
+    exit 1
+fi
+
+declare -r RELEASE="$1"
+declare -r ARCH="$2"
+declare -r RPM_ARCH="${YUM_RPM_ARCH_MAP[$ARCH]:-$ARCH}"
+
+if [ -z "${RELEASE_ARCH_MAP[$RELEASE]:+set}" ]; then
+    echo "Unknown release "$RELEASE"" >&2
+    exit 1
+fi
+eval "declare -r -A ARCH_MAP=(${RELEASE_ARCH_MAP[$RELEASE]})"
+
+declare -r ARCH_TYPE="${ARCH_MAP[$ARCH]:-}"
+if [ -z "$ARCH_TYPE" ]; then
+    echo "Architecture \"$ARCH\" not found for release \"$RELEASE\"" >&2
+    echo "Architectures available for release \"$RELEASE\": ${!ARCH_MAP[*]}" >&2
+    exit 1
+fi
+
+eval "declare -r -A URL_TYPE_FMT_MAP=(${RELEASE_URL_TYPE_FMT_MAP[$RELEASE]})"
+eval "declare -r URL_RELEASES=${URL_TYPE_FMT_MAP[${ARCH_TYPE}_releases]}"
+eval "declare -r URL_UPDATES=${URL_TYPE_FMT_MAP[${ARCH_TYPE}_updates]}"
+
+declare -r KERNEL_PACKAGE_URL_LIST=$(
+    repoquery --releasever="$RELEASE" \
+              --archlist="$RPM_ARCH" \
+              --repofrompath "releases,$URL_RELEASES" \
+              --repofrompath "updates,$URL_UPDATES" \
+              --location \
+              "kernel-core-[1-9]*"
+)
+
+if [ -z "$KERNEL_PACKAGE_URL_LIST" ]; then
+    echo "No kernel package found" >&2
+    exit 1
+fi
+if [[ $KERNEL_PACKAGE_URL_LIST =~ [[:space:]] ]]; then
+    echo "More than one kernel package found: $KERNEL_PACKAGE_URL_LIST" >&2
+    exit 1
+fi
+
+declare -r KERNEL_PACKAGE_URL="$KERNEL_PACKAGE_URL_LIST"
+
+curl --silent --show-error --location "$KERNEL_PACKAGE_URL" |
+    rpm2archive |
+    tar --extract --to-stdout --wildcards --gunzip --file=- "./lib/modules/*/config"
